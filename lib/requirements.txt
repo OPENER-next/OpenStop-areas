@@ -1,0 +1,8 @@
+fiona
+fsspec
+geoarrow-pyarrow
+geopandas
+pyarrow
+
+requests
+aiohttp

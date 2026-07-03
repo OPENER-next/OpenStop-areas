@@ -1,0 +1,40 @@
+name: Generate Areas Of Interest
+
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+  # Run every monday at 4 am
+  schedule:
+    - cron: '0 4 * * 1'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+
+    - name: Install Python Dependencies
+      run: pip install -r lib/requirements.txt
+
+    - name: Extract to GeoPackage
+      run: python lib/main.py
+
+    - name: Install GDAL/OGR
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gdal-bin
+
+    - name: Verify ogr2ogr Installation
+      run: ogr2ogr --version
+
+    - name: Extract to FlatGeobuf
+      run: ogr2ogr -f FlatGeobuf output.fgb output.gpkg
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: areas-of-interest
+        path: |
+          output.fgb
+          output.gpkg
