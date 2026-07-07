@@ -1,104 +1,100 @@
 """
-Streams a remote GeoParquet file (Preprocessed OpenStreetMap planet data) over HTTP,
+Streams a remote GeoParquet file (preprocessed OpenStreetMap planet data) over HTTP,
 filters for public transport elements, merges nearby elements and saves buffered areas locally.
-Can write the result to GeoPackage or FlatGeobuf.
+Writes the result to a FlatGeobuf file.
 """
 
-import geopandas as gp
-import pyarrow as pa
-import pyarrow.fs as pf
-import pyarrow.compute as pc
-import pyarrow.dataset as ds
-import geoarrow.pyarrow as ga
-import fsspec
-import fiona
-import fiona.crs as fcrs
+import duckdb
 
-# GeoParquet globals
-url = "https://download.openplanetdata.com/osm/planet/geoparquet/v1/planet-latest.osm.parquet"
+URL = "https://download.openplanetdata.com/osm/planet/geoparquet/v1/planet-latest.osm.parquet"
+OUTPUT_FILE = "output.fgb"
+DISTANCE_THRESHOLD = 100.0
+BUFFER_DISTANCE = 50.0
 
-required_columns = ["geometry", "tags"]
+con = duckdb.connect()
+con.sql("INSTALL httpfs; LOAD httpfs;")
+con.sql("INSTALL spatial; LOAD spatial;")
+# Can be used to manually limit memory usage, defaults to 80% of available RAM
+con.sql("SET memory_limit = '4GB';")
+con.sql("SET enable_progress_bar = true;")
 
-tags_field = pc.field("tags")
-highway_vals = pc.map_lookup(tags_field, "highway", "first")
-railway_vals = pc.map_lookup(tags_field, "railway", "first")
-pt_vals = pc.map_lookup(tags_field, "public_transport", "first")
-amenity_vals = pc.map_lookup(tags_field, "amenity", "first")
+# 1. Read, filter, and project data to a metric coordinate system
+con.sql(f"""
+    CREATE OR REPLACE VIEW filtered_elements AS
+    SELECT
+        ROW_NUMBER() OVER () AS id, -- Generate sequential IDs for cluster identification
+        ST_Transform(geometry, 'EPSG:3857') AS geometry,
+        tags['name'] AS name
+    FROM read_parquet('{URL}')
+    WHERE
+        tags['highway'] IN ('platform', 'bus_stop')
+        OR tags['railway'] IN ('platform', 'tram_stop', 'halt', 'station')
+        OR tags['public_transport'] = 'platform'
+        OR tags['amenity'] = 'bus_station'
+""")
 
-f_highway = pc.is_in(highway_vals, value_set=pa.array(["platform", "bus_stop"]))
-f_railway = pc.is_in(railway_vals, value_set=pa.array(["platform", "tram_stop", "halt", "station"]))
-f_pt = (pt_vals == "platform")
-f_amenity = (amenity_vals == "bus_station")
+# 2. Run graph-based proximity clustering using ST_DWithin and stream out to FlatGeobuf
+# If ST_ClusterWithin is ever supported by DuckDB, this could be simplified
+con.sql(f"""
+    COPY (
+        WITH RECURSIVE spatial_edges AS (
+            SELECT DISTINCT
+                a.id AS source_id,
+                b.id AS target_id
+            FROM filtered_elements a
+            INNER JOIN filtered_elements b
+                ON ST_DWithin(a.geometry, b.geometry, {DISTANCE_THRESHOLD})
+        ),
 
-tags_filter = f_highway | f_railway | f_pt | f_amenity
+        -- Recursively traverse chains to find the absolute minimum ID for each network cluster
+        graph_traversal AS (
+            -- Anchor member: Start by pointing every node to its direct neighbor
+            SELECT
+                source_id,
+                target_id AS cluster_anchor
+            FROM spatial_edges
 
-# Output file structure
-schema = {
-    'geometry': 'Polygon',
-    'properties': {'name': 'str'}
-}
+            -- Union will be applied as long as the recursive select output changes
+            UNION
 
-OUTPUT_FILE = "output.gpkg"
-BUFFER_RADIUS = 50.0
-GEOMETRY_RESOLUTION = 2
+            -- Recursive member: Propagate the lowest ID through the network chains
+            SELECT
+                gt.source_id,
+                se.target_id AS cluster_anchor
+            FROM graph_traversal gt
+            JOIN spatial_edges se
+                ON gt.cluster_anchor = se.source_id
+            WHERE se.target_id < gt.cluster_anchor -- Only keep traversing if we find a lower ID (prevents infinite loops)
+        ),
 
-# Open output file context and stream features
-# Using FlatGeobuf as driver would work but the file cannot be written to disk until finished processing due to the RTree
-with fiona.open(OUTPUT_FILE, "w", driver="GPKG", crs=fcrs.from_epsg(4326), schema=schema) as fgb:
-    # Make PyArrow compatible file system
-    pa_fs = pf.PyFileSystem(pf.FSSpecHandler(fsspec.filesystem("http")))
-    # Open the file as a PyArrow Dataset
-    # This reads only the metadata footer from the HTTP server
-    dataset = ds.dataset(url, filesystem=pa_fs, format="parquet")
-    # Read filtered GeoParquet batches
-    for batch in dataset.to_batches(filter=tags_filter, columns=required_columns):
-        # Extract name column from tags and geometry
-        name_vals = pc.map_lookup(batch["tags"], "name", "first")
-        geom_vals = ga.as_geoarrow(batch["geometry"], type=ga.wkb().with_crs("EPSG:4326"))
-        # PyArrow Table
-        pa_table = pa.Table.from_arrays(
-            [name_vals, geom_vals],
-            names=["name", "geometry"]
+        -- Group by each node and find its absolute final structural root component
+        final_clusters AS (
+            SELECT
+                source_id AS original_id,
+                MIN(cluster_anchor) AS global_cluster_id
+            FROM graph_traversal
+            GROUP BY source_id
+        ),
+
+        spatial_clusters AS (
+            SELECT
+                MODE(g.name) AS name,
+                ST_Buffer(ST_ConvexHull(ST_Collect(list(g.geometry))), {BUFFER_DISTANCE}, 2) AS geometry
+            FROM final_clusters c
+            JOIN filtered_elements g
+            ON c.original_id = g.id
+            GROUP BY c.global_cluster_id
         )
-        # Create GeoDataFrame
-        gdf = gp.GeoDataFrame.from_arrow(pa_table)
-        gdf.set_crs("EPSG:4326", inplace=True)
-        # Project to metric system (Web Mercator / EPSG:3857)
-        gdf.to_crs(epsg=3857, inplace=True)
-        # Buffer geometry with resolution
-        gdf['geometry'] = gdf.geometry.buffer(BUFFER_RADIUS, GEOMETRY_RESOLUTION)
 
-        # START merging intersecting geometries
-        def most_common(name_series):
-            most_names = name_series.mode()
-            return None if most_names.empty else most_names.iloc[0]
-        # Cluster overlapping geometries
-        merged_geom = gdf.geometry.union_all()
-        clusters = (
-            gp.GeoDataFrame(geometry=[merged_geom], crs=gdf.crs)
-            .explode(index_parts=False)
-            .reset_index(drop=True)
-        )
-        clusters['cluster_id'] = clusters.index
-        clusters['geometry'] = clusters.geometry.convex_hull
-        # Spatial join clusters with un-merged geometries so we can group by later
-        joined = gp.sjoin(gdf, clusters, how='left', predicate='intersects')
-        # Group by clusters and keep most occurring name
-        aggregated_names = (
-            joined.groupby('cluster_id')['name']
-            .agg(most_common)
-            .reset_index()
-        )
-        # Merge back the names to the clusters
-        gdf = clusters.merge(aggregated_names, on='cluster_id', how='left')
-        gdf.drop(columns=['cluster_id'], inplace=True)
-        # END merging intersecting geometries
-
-        # Un-project to original WGS84-System
-        gdf.to_crs(epsg=4326, inplace=True)
-
-        geojson_features = gdf.iterfeatures()
-        fgb.writerecords(geojson_features)
-        # Has no effect when using FlatGeobuf as fiona (more precisely GDAL)
-        # keeps the file in memory because it must compute the R-Tree spatial index
-        fgb.flush()
+        SELECT
+            ST_Transform(geometry, 'EPSG:3857', 'EPSG:4326') AS geometry,
+            name
+        FROM spatial_clusters
+    )
+    TO '{OUTPUT_FILE}'
+    WITH (
+        FORMAT GDAL,
+        DRIVER 'FlatGeobuf',
+        LAYER_CREATION_OPTIONS 'SPATIAL_INDEX=NO'
+    );
+""")

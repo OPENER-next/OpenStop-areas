@@ -1,8 +1,1 @@
-fiona
-fsspec
-geoarrow-pyarrow
-geopandas
-pyarrow
-
-requests
-aiohttp
+duckdb==1.5.4

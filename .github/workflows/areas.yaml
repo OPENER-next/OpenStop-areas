@@ -8,7 +8,7 @@ on:
     - cron: '0 4 * * 1'
 
 jobs:
-  build:
+  extract:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
@@ -17,7 +17,7 @@ jobs:
     - name: Install Python Dependencies
       run: pip install -r lib/requirements.txt
 
-    - name: Extract to GeoPackage
+    - name: Extract to FlatGeobuf
       run: python lib/main.py
 
     - name: Install GDAL/OGR
@@ -29,7 +29,7 @@ jobs:
       run: ogr2ogr --version
 
     - name: Extract to FlatGeobuf
-      run: ogr2ogr -f FlatGeobuf output.fgb output.gpkg
+      run: ogr2ogr -f FlatGeobuf -lco SPATIAL_INDEX=YES output-final.fgb output.fgb
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v7
@@ -37,4 +37,4 @@ jobs:
         name: areas-of-interest
         path: |
           output.fgb
-          output.gpkg
+          output-final.fgb
