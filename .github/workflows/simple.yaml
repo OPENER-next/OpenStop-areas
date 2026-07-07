@@ -1,0 +1,26 @@
+name: Extract Public Transport Elements
+
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+
+    - name: Install Python Dependencies
+      run: pip install -r lib/requirements.txt
+
+    - name: Extract to FlatGeobuf
+      run: python lib/simple.py
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: areas-of-interest
+        path: |
+          output.fgb
+
