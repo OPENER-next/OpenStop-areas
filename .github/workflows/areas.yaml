@@ -3,9 +3,6 @@ name: Generate Areas Of Interest
 on:
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
-  # Run every monday at 4 am
-  schedule:
-    - cron: '0 4 * * 1'
 
 jobs:
   extract:
@@ -14,27 +11,14 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v6
 
-    - name: Install Python Dependencies
-      run: pip install -r lib/requirements.txt
+    - name: Setup DuckDB
+      uses: opt-nc/setup-duckdb-action@v1.2.10
 
     - name: Extract to FlatGeobuf
-      run: python lib/main.py
-
-    - name: Install GDAL/OGR
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y gdal-bin
-
-    - name: Verify ogr2ogr Installation
-      run: ogr2ogr --version
-
-    - name: Extract to FlatGeobuf
-      run: ogr2ogr -f FlatGeobuf -lco SPATIAL_INDEX=YES output-final.fgb output.fgb
+      run: duckdb < lib/main.sql
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v7
       with:
         name: areas-of-interest
-        path: |
-          output.fgb
-          output-final.fgb
+        path: output.fgb
