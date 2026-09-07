@@ -2,7 +2,7 @@
  * Streams a remote GeoParquet file (preprocessed OpenStreetMap planet data) over HTTP,
  * filters for public transport elements, merges nearby elements (and elements that share
  * the same name) and saves buffered areas locally.
- * Writes the result to a FlatGeobuf file.
+ * Writes the result to custom CSV files partitoned by their h3 ID.
  *
  * As DuckDB methods mostly require planar geometries each element is projected
  * into its own local best-fit UTM zone up front. Distance comparisons for clustering
@@ -14,8 +14,12 @@
 
 INSTALL httpfs;
 LOAD httpfs;
+
 INSTALL spatial;
 LOAD spatial;
+
+INSTALL h3 FROM community;
+LOAD h3;
 
 -- Can be used to manually limit memory usage, defaults to 80% of available RAM
 SET memory_limit = '4GB';
@@ -25,13 +29,14 @@ SET enable_progress_bar_print = true;
 SET geometry_always_xy = true;
 -- Custom variables
 SET VARIABLE INPUT_FILE = "https://download.openplanetdata.com/osm/planet/geoparquet/v1/planet-latest.osm.parquet";
-SET VARIABLE OUTPUT_FILE = "output.fgb";
+SET VARIABLE OUTPUT_DIR = "output";
 -- Elements are merged if they are within this distance
 SET VARIABLE RAW_DISTANCE_THRESHOLD = 100.0;
 -- Elements that share the same (non-null) name are merged if they are within this distance
 SET VARIABLE NAME_DISTANCE_THRESHOLD = 300.0;
 SET VARIABLE BUFFER_DISTANCE = 50.0;
 SET VARIABLE IGNORE_AREA_LIMIT = 200000;
+SET VARIABLE H3_RESOLUTION = 4;
 
 -- Determines the best-fit UTM zone for a given geometry by using its centroid
 CREATE OR REPLACE FUNCTION get_utm_epsg_from_geom(geom) AS (
@@ -138,17 +143,28 @@ COPY (
         JOIN filtered_by_size g
         ON c.original_id = g.id
         GROUP BY c.global_cluster_id
+    ),
+
+    -- Transform back to WGS84 and calculate H3 cell id
+    prepare_data as (
+        SELECT
+            ST_Transform(proj_geometry, utm_epsg, 'OGC:CRS84') AS geometry,
+            ST_Extent(geometry)::STRUCT(min_x DOUBLE, min_y DOUBLE, max_x DOUBLE, max_y DOUBLE) AS box,
+            name,
+            h3_latlng_to_cell(ST_Y(ST_Centroid(geometry)), ST_X(ST_Centroid(geometry)), getvariable('H3_RESOLUTION')) AS h3_id
+        FROM spatial_clusters
     )
 
-    -- Transform back to WGS84
+    -- Select bbox values into individual columns
     SELECT
-        ST_Transform(proj_geometry, utm_epsg, 'OGC:CRS84') AS geometry,
-        name
-    FROM spatial_clusters
+        box.*,
+        name,
+        h3_id
+    FROM prepare_data
 )
-TO (getvariable('OUTPUT_FILE'))
+TO (getvariable('OUTPUT_DIR'))
 WITH (
-    FORMAT GDAL,
-    DRIVER 'FlatGeobuf',
-    LAYER_CREATION_OPTIONS 'SPATIAL_INDEX=YES'
+    FORMAT CSV,
+    PARTITION_BY h3_id
+    --COMPRESSION gzip
 );

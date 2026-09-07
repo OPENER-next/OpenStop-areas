@@ -5,9 +5,14 @@ This repository contains a script to generate public transport areas of interest
 ## Workflow
 1. Use GeoParquet planet file as a source, because it contains pre-built geometries.
 2. Stream data over HTTP and filter for public transport elements.
-3. Buffer and merge overlapping geometries.
-4. Export as GeoPackage as an intermediate format because it can be streamed to disk.
-5. Convert to FlatGeobuf for fast random spatial access.
+3. Merge nearby geometries and buffer them.
+4. Export bounding boxes and names as CSV files partitioned by H3's geospatial index
+
+## Usage
+1. Install [DuckDB CLI](https://duckdb.org/install/?environment=cli)
+2. Optionally edit `INPUT_FILE` variable in `main.sql` if you already pre-downloaded the file
+3. Run `duckdb < lib/main.sql`
+4. Run `./lib/flatten.sh`
 
 ## Notes
 Directly working with the osm.pbf planet file like so:
