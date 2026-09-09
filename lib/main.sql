@@ -35,7 +35,8 @@ SET VARIABLE RAW_DISTANCE_THRESHOLD = 100.0;
 -- Elements that share the same (non-null) name are merged if they are within this distance
 SET VARIABLE NAME_DISTANCE_THRESHOLD = 300.0;
 SET VARIABLE BUFFER_DISTANCE = 50.0;
-SET VARIABLE IGNORE_AREA_LIMIT = 200000;
+-- Ignore elements with bbox's dimension larger than this
+SET VARIABLE IGNORE_SIZE_LIMIT = 800;
 SET VARIABLE H3_RESOLUTION = 4;
 
 -- Determines the best-fit UTM zone for a given geometry by using its centroid
@@ -74,7 +75,9 @@ FROM filtered_elements;
 CREATE OR REPLACE VIEW filtered_by_size AS
 SELECT *
 FROM projected_elements
-WHERE ST_Area(proj_geometry) < getvariable('IGNORE_AREA_LIMIT');
+-- Filters large polygons and line strings
+WHERE (ST_XMax(proj_geometry) - ST_XMin(proj_geometry)) < getvariable('IGNORE_SIZE_LIMIT')
+  AND (ST_YMax(proj_geometry) - ST_YMin(proj_geometry)) < getvariable('IGNORE_SIZE_LIMIT');
 
 -- Run graph-based proximity clustering using ST_DWithin and stream out to FlatGeobuf
 -- If ST_ClusterWithin is ever supported by DuckDB, this could be simplified
@@ -161,6 +164,8 @@ COPY (
         name,
         h3_id
     FROM prepare_data
+    -- forces partitioning to create just one file
+    ORDER BY h3_id
 )
 TO (getvariable('OUTPUT_DIR'))
 WITH (
