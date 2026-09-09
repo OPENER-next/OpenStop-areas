@@ -22,11 +22,13 @@ INSTALL h3 FROM community;
 LOAD h3;
 
 -- Can be used to manually limit memory usage, defaults to 80% of available RAM
-SET memory_limit = '4GB';
+--SET memory_limit = '4GB';
 -- Displays a progress bar in the terminal
 SET enable_progress_bar = true;
 SET enable_progress_bar_print = true;
 SET geometry_always_xy = true;
+-- Potential performance optimization
+SET preserve_insertion_order = false;
 -- Custom variables
 SET VARIABLE INPUT_FILE = "https://download.openplanetdata.com/osm/planet/geoparquet/v1/planet-latest.osm.parquet";
 SET VARIABLE OUTPUT_DIR = "output";
